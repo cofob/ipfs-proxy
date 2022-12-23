@@ -130,15 +130,14 @@ impl IntoResponse for CustomError {
     }
 }
 
-async fn cid_updater(state: Arc<SharedState>) {
+async fn cid_updater(state: Arc<SharedState>) -> Result<()> {
     debug!("CID updater started");
     let mut page = 1;
     let mut updated = 0;
     loop {
         let mut changed = false;
         let cids = fetch_cid_page(&state.client, &state.api_key, page)
-            .await
-            .unwrap();
+            .await?;
         if cids.len() == 0 {
             break;
         };
@@ -168,11 +167,12 @@ async fn cid_updater(state: Arc<SharedState>) {
     if updated > 0 {
         debug!("Fetched {} new CID's", updated);
     }
+    Ok(())
 }
 
 async fn cid_updater_scheduler(state: Arc<SharedState>) {
     loop {
-        cid_updater(state.clone()).await;
+        let _ = cid_updater(state.clone()).await;
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }

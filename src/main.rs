@@ -31,13 +31,10 @@ async fn fetch_cid_page(
     page: usize,
     fetch_page_size: usize,
 ) -> Result<Vec<String>> {
-    let url = format!(
-        "https://api.web3.storage/user/uploads?page={}&size={}",
-        page, fetch_page_size
-    );
+    let url = format!("https://api.web3.storage/user/uploads?page={page}&size={fetch_page_size}");
     let res = client
         .get(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Authorization", format!("Bearer {api_key}"))
         .send()
         .await?;
     if res.status() == 416 {
@@ -79,7 +76,7 @@ async fn handler(
         debug!("CID: {}", cid);
         let mut tasks = JoinSet::new();
         for gateway in &state.ipfs_gateways {
-            let url = format!("{}/{}", gateway, path);
+            let url = format!("{gateway}/{path}");
             let state = state.clone();
             tasks.spawn(async move {
                 debug!("Requesting gateway: {}", url);
@@ -90,9 +87,9 @@ async fn handler(
                 let res = res.expect("Failed to request gateway");
                 if res.status().is_success() {
                     debug!("Gateway responded: {}", url);
-                    return Some(res);
+                    Some(res)
                 } else {
-                    return None;
+                    None
                 }
             });
         }
@@ -114,7 +111,7 @@ async fn handler(
         Err(CustomError::InternalServerError)
     } else {
         debug!("CID not found: {}", cid);
-        return Err(CustomError::CidNotFound);
+        Err(CustomError::CidNotFound)
     }
 }
 
@@ -143,7 +140,7 @@ async fn cid_updater(state: Arc<SharedState>, fetch_page_size: usize) -> Result<
     loop {
         let mut changed = false;
         let cids = fetch_cid_page(&state.client, &state.api_key, page, fetch_page_size).await?;
-        if cids.len() == 0 {
+        if cids.is_empty() {
             break;
         };
         loop {
@@ -227,7 +224,7 @@ async fn main() -> Result<()> {
             "https://ipfs.io/ipfs,https://w3s.link/ipfs,https://cloudflare-ipfs.com/ipfs,https://hardbin.com/ipfs,https://gateway.pinata.cloud/ipfs"
                 .to_string()
         })
-        .split(",")
+        .split(',')
         .map(|x| x.to_string())
         .collect();
 

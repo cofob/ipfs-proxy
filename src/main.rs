@@ -8,6 +8,10 @@ use axum::{routing::get, Router};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
+use tokio::task::JoinSet;
+
+#[macro_use]
+extern crate log;
 
 #[derive(Deserialize)]
 struct CidPage {
@@ -18,7 +22,7 @@ struct SharedState {
     allowed_cids: Mutex<Vec<String>>,
     client: Client,
     api_key: String,
-    ipfs_gateway: String,
+    ipfs_gateways: Vec<String>,
 }
 
 async fn fetch_cid_page(client: &Client, api_key: &str, page: usize) -> Result<Vec<String>> {
@@ -67,27 +71,44 @@ async fn handler(
         }
     }
     if is_allowed {
-        println!("CID: {}", cid);
-        let url = format!("{}/{}", state.ipfs_gateway, path);
-        let res = state.client.get(&url).send().await;
-        if res.is_err() {
-            return Err(CustomError::InternalServerError);
+        debug!("CID: {}", cid);
+        let mut tasks = JoinSet::new();
+        for gateway in &state.ipfs_gateways {
+            let url = format!("{}/{}", gateway, path);
+            let state = state.clone();
+            tasks.spawn(async move {
+                debug!("Requesting gateway: {}", url);
+                let res = state.client.get(&url).send().await;
+                if res.is_err() {
+                    return None;
+                }
+                let res = res.expect("Failed to request gateway");
+                if res.status().is_success() {
+                    debug!("Gateway responded: {}", url);
+                    return Some(res);
+                } else {
+                    return None;
+                }
+            });
         }
-        let res = res.unwrap();
-        if res.status().is_success() {
-            return Ok(Response::builder()
-                .status(res.status())
-                .header(
-                    "Content-Type",
-                    res.headers().get("Content-Type").unwrap().to_str().unwrap(),
-                )
-                .body(res.bytes().await.unwrap().into())
-                .unwrap());
-        } else {
-            return Err(CustomError::InternalServerError);
+        while let Some(res) = tasks.join_next().await {
+            if res.is_ok() {
+                let res = res.unwrap();
+                if res.is_some() {
+                    let res = res.unwrap();
+                    return Ok(Response::builder()
+                        .header(
+                            "Content-Type",
+                            res.headers().get("Content-Type").unwrap().to_str().unwrap(),
+                        )
+                        .body(res.bytes().await.unwrap().into())
+                        .unwrap());
+                }
+            }
         }
+        Err(CustomError::InternalServerError)
     } else {
-        println!("CID not found: {}", cid);
+        debug!("CID not found: {}", cid);
         return Err(CustomError::CidNotFound);
     }
 }
@@ -110,6 +131,7 @@ impl IntoResponse for CustomError {
 }
 
 async fn cid_updater(state: Arc<SharedState>) {
+    debug!("CID updater started");
     let mut page = 1;
     let mut updated = 0;
     loop {
@@ -144,38 +166,47 @@ async fn cid_updater(state: Arc<SharedState>) {
         }
     }
     if updated > 0 {
-        println!("Fetched {} new CID's", updated);
+        debug!("Fetched {} new CID's", updated);
     }
 }
 
 async fn cid_updater_scheduler(state: Arc<SharedState>) {
     loop {
         cid_updater(state.clone()).await;
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    pretty_env_logger::init();
+
     // get web3.stogade API key from env
     let api_key = std::env::var("STORAGE_API_KEY").expect("STORAGE_API_KEY must be set");
 
     // get host and port from env
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
 
-    // get IPFS_GATEWAY
-    let ipfs_gateway = std::env::var("IPFS_GATEWAY").unwrap_or_else(|_| "https://ipfs.io/ipfs".to_string());
+    // get IPFS_GATEWAYS
+    let ipfs_gateways = std::env::var("IPFS_GATEWAYS")
+        .unwrap_or_else(|_| {
+            "https://ipfs.io/ipfs,https://w3s.link/ipfs,https://cloudflare-ipfs.com/ipfs,https://hardbin.com/ipfs,https://gateway.pinata.cloud/ipfs"
+                .to_string()
+        })
+        .split(",")
+        .map(|x| x.to_string())
+        .collect();
 
     // create a reqwest client
     let client = Client::new();
 
     // build a vector of allowed IPFS CID's
-    println!("Fetching allowed CIDs, this may take a while...");
+    info!("Fetching allowed CIDs, this may take a while...");
     let mut allowed_cids: Vec<String> = Vec::with_capacity(1000);
     {
         let mut page = 1;
         loop {
-            println!("Fetching page {}...", page);
+            debug!("Fetching page {}...", page);
             let cids = fetch_cid_page(&client, &api_key, page).await?;
             if cids.len() == 0 {
                 break;
@@ -184,13 +215,13 @@ async fn main() -> Result<()> {
             allowed_cids.extend(cids);
         }
     }
-    println!("Found {} allowed CIDs", allowed_cids.len());
+    info!("Found {} allowed CIDs", allowed_cids.len());
 
     let shared_state = Arc::new(SharedState {
         allowed_cids: Mutex::new(allowed_cids),
         client,
         api_key,
-        ipfs_gateway,
+        ipfs_gateways,
     });
 
     tokio::spawn(cid_updater_scheduler(shared_state.clone()));
@@ -201,7 +232,7 @@ async fn main() -> Result<()> {
         .with_state(shared_state);
 
     // run it with hyper on localhost:3000
-    println!("Listening on {}", host);
+    info!("Listening on {}", host);
     axum::Server::bind(&host.parse().unwrap())
         .serve(app.into_make_service())
         .await

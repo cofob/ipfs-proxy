@@ -9,8 +9,6 @@ use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 
-const IPFS_GATEWAY: &str = "https://w3s.link/ipfs";
-
 #[derive(Deserialize)]
 struct CidPage {
     cid: String,
@@ -20,6 +18,7 @@ struct SharedState {
     allowed_cids: Mutex<Vec<String>>,
     client: Client,
     api_key: String,
+    ipfs_gateway: String,
 }
 
 async fn fetch_cid_page(client: &Client, api_key: &str, page: usize) -> Result<Vec<String>> {
@@ -69,7 +68,7 @@ async fn handler(
     }
     if is_allowed {
         println!("CID: {}", cid);
-        let url = format!("{}/{}", IPFS_GATEWAY, path);
+        let url = format!("{}/{}", state.ipfs_gateway, path);
         let res = state.client.get(&url).send().await;
         if res.is_err() {
             return Err(CustomError::InternalServerError);
@@ -164,6 +163,9 @@ async fn main() -> Result<()> {
     // get host and port from env
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
 
+    // get IPFS_GATEWAY
+    let ipfs_gateway = std::env::var("IPFS_GATEWAY").unwrap_or_else(|_| "https://ipfs.io/ipfs".to_string());
+
     // create a reqwest client
     let client = Client::new();
 
@@ -188,6 +190,7 @@ async fn main() -> Result<()> {
         allowed_cids: Mutex::new(allowed_cids),
         client,
         api_key,
+        ipfs_gateway,
     });
 
     tokio::spawn(cid_updater_scheduler(shared_state.clone()));

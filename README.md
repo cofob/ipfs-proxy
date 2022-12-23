@@ -18,5 +18,6 @@ Required environment variables:
 Optional environment variables:
 
 - `HOST` - host to listen on (default: `0.0.0.0:3000`).
+- `IPFS_GATEWAY` - IPFS gateway to use (default: `https://ipfs.io/ipfs`).
 
 You can use binary from flake.

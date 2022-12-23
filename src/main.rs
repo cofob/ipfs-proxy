@@ -25,10 +25,15 @@ struct SharedState {
     ipfs_gateways: Vec<String>,
 }
 
-async fn fetch_cid_page(client: &Client, api_key: &str, page: usize) -> Result<Vec<String>> {
+async fn fetch_cid_page(
+    client: &Client,
+    api_key: &str,
+    page: usize,
+    fetch_page_size: usize,
+) -> Result<Vec<String>> {
     let url = format!(
-        "https://api.web3.storage/user/uploads?page={}&size=500",
-        page
+        "https://api.web3.storage/user/uploads?page={}&size={}",
+        page, fetch_page_size
     );
     let res = client
         .get(&url)
@@ -130,14 +135,14 @@ impl IntoResponse for CustomError {
     }
 }
 
-async fn cid_updater(state: Arc<SharedState>) -> Result<()> {
+async fn cid_updater(state: Arc<SharedState>, fetch_page_size: usize) -> Result<()> {
     debug!("CID updater started");
+    let time_start = std::time::Instant::now();
     let mut page = 1;
     let mut updated = 0;
     loop {
         let mut changed = false;
-        let cids = fetch_cid_page(&state.client, &state.api_key, page)
-            .await?;
+        let cids = fetch_cid_page(&state.client, &state.api_key, page, fetch_page_size).await?;
         if cids.len() == 0 {
             break;
         };
@@ -164,21 +169,50 @@ async fn cid_updater(state: Arc<SharedState>) -> Result<()> {
             break;
         }
     }
+    let time_end = std::time::Instant::now();
+    debug!(
+        "CID updater finished in {}ms",
+        time_end.duration_since(time_start).as_millis()
+    );
     if updated > 0 {
-        debug!("Fetched {} new CID's", updated);
+        info!("Fetched {} new CID's", updated);
     }
     Ok(())
 }
 
-async fn cid_updater_scheduler(state: Arc<SharedState>) {
+async fn cid_updater_scheduler(
+    state: Arc<SharedState>,
+    fetch_interval: usize,
+    fetch_page_size: usize,
+) {
     loop {
-        let _ = cid_updater(state.clone()).await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let time_start = std::time::Instant::now();
+        let current = tokio::spawn(cid_updater(state.clone(), fetch_page_size));
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if current.is_finished() {
+                break;
+            }
+        }
+        let time_end = std::time::Instant::now();
+        let time_elapsed = time_end.duration_since(time_start).as_secs();
+        if time_elapsed < fetch_interval as u64 {
+            tokio::time::sleep(std::time::Duration::from_secs(
+                fetch_interval as u64 - time_elapsed,
+            ))
+            .await;
+        } else {
+            warn!("CID updater took longer than fetch interval");
+        }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // set default log level to info
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info");
+    }
     pretty_env_logger::init();
 
     // get web3.stogade API key from env
@@ -197,34 +231,33 @@ async fn main() -> Result<()> {
         .map(|x| x.to_string())
         .collect();
 
+    // get FETCH_INTERVAL
+    let fetch_interval = std::env::var("FETCH_INTERVAL")
+        .unwrap_or_else(|_| "3".to_string())
+        .parse::<usize>()
+        .unwrap_or(2);
+
+    // get FETCH_PAGE_SIZE
+    let fetch_page_size = std::env::var("FETCH_PAGE_SIZE")
+        .unwrap_or_else(|_| "500".to_string())
+        .parse::<usize>()
+        .unwrap_or(100);
+
     // create a reqwest client
     let client = Client::new();
 
-    // build a vector of allowed IPFS CID's
-    info!("Fetching allowed CIDs, this may take a while...");
-    let mut allowed_cids: Vec<String> = Vec::with_capacity(1000);
-    {
-        let mut page = 1;
-        loop {
-            debug!("Fetching page {}...", page);
-            let cids = fetch_cid_page(&client, &api_key, page).await?;
-            if cids.len() == 0 {
-                break;
-            }
-            page += 1;
-            allowed_cids.extend(cids);
-        }
-    }
-    info!("Found {} allowed CIDs", allowed_cids.len());
-
     let shared_state = Arc::new(SharedState {
-        allowed_cids: Mutex::new(allowed_cids),
+        allowed_cids: Mutex::new(Vec::with_capacity(1000)),
         client,
         api_key,
         ipfs_gateways,
     });
 
-    tokio::spawn(cid_updater_scheduler(shared_state.clone()));
+    tokio::spawn(cid_updater_scheduler(
+        shared_state.clone(),
+        fetch_interval,
+        fetch_page_size,
+    ));
 
     // build our application with a single route
     let app = Router::new()

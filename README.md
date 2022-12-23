@@ -13,7 +13,7 @@ If CID is in the list, we return content from IPFS gateway.
 
 All IPFS gateways are checked in parallel and first valid response is returned.
 
-Updates from web3.storage are fetched every 2 seconds.
+Updates from web3.storage are fetched every 3 seconds.
 
 ## Setup
 
@@ -25,5 +25,7 @@ Optional environment variables:
 
 - `HOST` - host to listen on (default: `0.0.0.0:3000`).
 - `IPFS_GATEWAYS` - IPFS gateways to use (default: `https://ipfs.io/ipfs`, `https://w3s.link/ipfs`, `https://cloudflare-ipfs.com/ipfs`, `https://hardbin.com/ipfs,https://gateway.pinata.cloud/ipfs`).
+- `FETCH_INTERVAL` - interval to fetch updates from web3.storage (default: `3s`).
+- `FETCH_PAGE_SIZE` - page size for fetching updates from web3.storage (default: `500`).
 
 You can use binary from flake.

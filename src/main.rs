@@ -60,7 +60,7 @@ async fn handler(
     {
         let mut attempts = 0;
         loop {
-            if attempts > 10 {
+            if attempts > 20 {
                 return Err(CustomError::InternalServerError);
             }
             if state.allowed_cids.try_lock().is_ok() {
@@ -68,7 +68,7 @@ async fn handler(
                 is_allowed = lock.contains(&cid);
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
             attempts += 1;
         }
     }
@@ -170,7 +170,7 @@ async fn cid_updater(state: Arc<SharedState>, fetch_page_size: usize) -> Result<
                 page += 1;
                 break;
             } else {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
         if !changed {

@@ -4,6 +4,13 @@ IPFS proxy that restricts path-based gateways. (aka. ipfs gateway dlya bomzhey)
 
 Repository contains only shitcode, so please, don't look at it.
 
+**Warning:** this is a proof a concept and it's not production ready.
+
+## TODO
+
+- [x] Multiple IPFS gateways.
+- [ ] Streaming responses.
+
 ## How it works
 
 We download list of CID's from web3.storage and then we use it to restrict access to IPFS gateway.

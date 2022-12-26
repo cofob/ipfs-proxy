@@ -1,5 +1,5 @@
 use anyhow::Result;
-use axum::body::Body;
+use axum::body::StreamBody;
 use axum::extract::{Path, State};
 use axum::http::Response;
 use axum::response::IntoResponse;
@@ -52,7 +52,7 @@ async fn fetch_cid_page(
 async fn handler(
     State(state): State<Arc<SharedState>>,
     Path(path): Path<String>,
-) -> Result<Response<Body>, CustomError> {
+) -> Result<impl IntoResponse, CustomError> {
     let cid = path.split('/').next().unwrap().to_string();
 
     let is_allowed;
@@ -98,12 +98,23 @@ async fn handler(
                 let res = res.unwrap();
                 if res.is_some() {
                     let res = res.unwrap();
+                    let status = res.status();
+                    if !status.is_success() {
+                        continue;
+                    }
+                    let content_type = res
+                        .headers()
+                        .get("Content-Type")
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_string();
+                    let stream = res.bytes_stream();
+                    let body = StreamBody::new(stream);
                     return Ok(Response::builder()
-                        .header(
-                            "Content-Type",
-                            res.headers().get("Content-Type").unwrap().to_str().unwrap(),
-                        )
-                        .body(res.bytes().await.unwrap().into())
+                        .status(status)
+                        .header("Content-Type", content_type)
+                        .body(body)
                         .unwrap());
                 }
             }

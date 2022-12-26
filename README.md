@@ -4,12 +4,11 @@ IPFS proxy that restricts path-based gateways. (aka. ipfs gateway dlya bomzhey)
 
 Repository contains only shitcode, so please, don't look at it.
 
-**Warning:** this is a proof a concept and it's not production ready.
-
-## TODO
+## Features
 
 - [x] Multiple IPFS gateways.
-- [ ] Streaming responses.
+- [x] Streaming responses.
+- [ ] HTTP/SOCKS5 proxy support.
 
 ## How it works
 

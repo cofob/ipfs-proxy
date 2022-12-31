@@ -109,11 +109,19 @@ async fn handler(
                         .to_str()
                         .unwrap()
                         .to_string();
+                    let content_length = res
+                        .headers()
+                        .get("Content-Length")
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_string();
                     let stream = res.bytes_stream();
                     let body = StreamBody::new(stream);
                     return Ok(Response::builder()
                         .status(status)
                         .header("Content-Type", content_type)
+                        .header("Content-Length", content_length)
                         .body(body)
                         .unwrap());
                 }

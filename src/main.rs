@@ -7,7 +7,8 @@ use axum::Json;
 use axum::{routing::get, Router};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 #[macro_use]
@@ -58,19 +59,8 @@ async fn handler(
     let is_allowed;
 
     {
-        let mut attempts = 0;
-        loop {
-            if attempts > 20 {
-                return Err(CustomError::InternalServerError);
-            }
-            if state.allowed_cids.try_lock().is_ok() {
-                let lock = state.allowed_cids.lock().unwrap();
-                is_allowed = lock.contains(&cid);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
-            attempts += 1;
-        }
+        let lock = state.allowed_cids.lock().await;
+        is_allowed = lock.contains(&cid);
     }
     if is_allowed {
         debug!("CID: {}", cid);
@@ -159,25 +149,18 @@ async fn cid_updater(state: Arc<SharedState>, fetch_page_size: usize) -> Result<
         if cids.is_empty() {
             break;
         };
-        loop {
-            if state.allowed_cids.try_lock().is_ok() {
-                let mut lock = state.allowed_cids.lock().unwrap();
-                for cid in cids {
-                    if !lock.contains(&cid) {
-                        lock.push(cid);
-                        updated += 1;
-                        changed = true;
-                    }
-                }
-                if !changed {
-                    break;
-                }
-                page += 1;
-                break;
-            } else {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut lock = state.allowed_cids.lock().await;
+        for cid in &cids {
+            if !lock.contains(cid) {
+                lock.push(cid.to_string());
+                updated += 1;
+                changed = true;
             }
         }
+        if !changed {
+            break;
+        }
+        page += 1;
         if !changed {
             break;
         }

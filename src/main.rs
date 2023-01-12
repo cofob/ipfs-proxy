@@ -8,7 +8,7 @@ use axum::{routing::get, Router};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 
 #[macro_use]
@@ -20,7 +20,7 @@ struct CidPage {
 }
 
 struct SharedState {
-    allowed_cids: Mutex<Vec<String>>,
+    allowed_cids: RwLock<Vec<String>>,
     client: Client,
     api_key: String,
     ipfs_gateways: Vec<String>,
@@ -59,7 +59,7 @@ async fn handler(
     let is_allowed;
 
     {
-        let lock = state.allowed_cids.lock().await;
+        let lock = state.allowed_cids.read().await;
         is_allowed = lock.contains(&cid);
     }
     if is_allowed {
@@ -149,7 +149,7 @@ async fn cid_updater(state: Arc<SharedState>, fetch_page_size: usize) -> Result<
         if cids.is_empty() {
             break;
         };
-        let mut lock = state.allowed_cids.lock().await;
+        let mut lock = state.allowed_cids.write().await;
         for cid in &cids {
             if !lock.contains(cid) {
                 lock.push(cid.to_string());
@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
     let client = Client::new();
 
     let shared_state = Arc::new(SharedState {
-        allowed_cids: Mutex::new(Vec::with_capacity(1000)),
+        allowed_cids: RwLock::new(Vec::with_capacity(1000)),
         client,
         api_key,
         ipfs_gateways,

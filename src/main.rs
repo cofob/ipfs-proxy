@@ -1,15 +1,71 @@
 use anyhow::Result;
-use axum::body::StreamBody;
+use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::Response;
 use axum::response::IntoResponse;
 use axum::Json;
 use axum::{routing::get, Router};
+use futures::Future;
+use futures::Stream;
+use reqwest::Error;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::fs::File;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::io::BufWriter;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
+use tokio_util::io::ReaderStream;
+
+struct CachingStream<S> {
+    inner: S,
+    writer: BufWriter<File>,
+}
+
+impl<S> CachingStream<S>
+where
+    S: Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
+{
+    fn new(inner: S, writer: BufWriter<File>) -> Self {
+        Self { inner, writer }
+    }
+}
+
+impl<S> Stream for CachingStream<S>
+where
+    S: Stream<Item = Result<Bytes, Error>> + Unpin,
+{
+    type Item = Result<Bytes, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.as_mut().get_mut();
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(data))) => {
+                let data_clone = data.clone();
+                let fut = this.writer.write_all(&data);
+                tokio::pin!(fut);
+                match fut.poll(cx) {
+                    Poll::Ready(Ok(_)) => {
+                        let _ = this.writer.flush();
+                        Poll::Ready(Some(Ok(data_clone)))
+                    }
+                    Poll::Ready(Err(_)) => Poll::Ready(None),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 #[macro_use]
 extern crate log;
@@ -56,62 +112,109 @@ async fn handler(
 ) -> Result<impl IntoResponse, CustomError> {
     let cid = path.split('/').next().unwrap().to_string();
 
-    let is_allowed;
+    let is_allowed = true;
+    let cache_path = format!("./cache/{}", cid.replace("/", "_"));
+    let cache_meta_path = format!("{}.meta", cache_path);
 
-    {
-        let lock = state.allowed_cids.read().await;
-        is_allowed = lock.contains(&cid);
-    }
+    // {
+    //     let lock = state.allowed_cids.read().await;
+    //     is_allowed = lock.contains(&cid);
+    // }
     if is_allowed {
         debug!("CID: {}", cid);
-        let mut tasks = JoinSet::new();
-        for gateway in &state.ipfs_gateways {
-            let url = format!("{gateway}/{path}");
-            let state = state.clone();
-            tasks.spawn(async move {
-                debug!("Requesting gateway: {}", url);
-                let res = state.client.get(&url).send().await;
-                if res.is_err() {
-                    return None;
-                }
-                let res = res.expect("Failed to request gateway");
-                if res.status().is_success() {
-                    debug!("Gateway responded: {}", url);
-                    Some(res)
-                } else {
-                    None
-                }
-            });
-        }
-        while let Some(res) = tasks.join_next().await {
-            if res.is_ok() {
-                let res = res.unwrap();
-                if res.is_some() {
-                    let res = res.unwrap();
-                    let status = res.status();
-                    if !status.is_success() {
-                        continue;
+        if PathBuf::from(&cache_path).exists() && PathBuf::from(&cache_meta_path).exists() {
+            debug!("Serving from cache: {}", cache_path);
+
+            // Load meta data
+            let mut file = File::open(&cache_meta_path).await.unwrap();
+            let mut meta = String::new();
+            file.read_to_string(&mut meta).await.unwrap();
+            let meta: Vec<&str> = meta.split(' ').collect();
+            let content_type = meta[0].to_string();
+            let content_length = meta[1].parse::<u64>().unwrap();
+
+            // Load file
+            let file = File::open(&cache_path).await.unwrap();
+            let stream = ReaderStream::new(file);
+
+            // Return response
+            let body = Body::wrap_stream(stream);
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", content_type)
+                .header("Content-Length", content_length)
+                .header("Content-Type", "text/plain")
+                .body(body)
+                .unwrap());
+        } else {
+            let mut tasks = JoinSet::new();
+            for gateway in &state.ipfs_gateways {
+                let url = format!("{}/{}", gateway, path);
+                let state = state.clone();
+                let cache_path = cache_path.clone();
+                let cache_meta_path = cache_meta_path.clone();
+                tasks.spawn(async move {
+                    debug!("Requesting gateway: {}", url);
+                    let res = state.client.get(&url).send().await;
+                    if res.is_err() {
+                        return None;
                     }
-                    let content_type = res
-                        .headers()
-                        .get("Content-Type")
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .to_string();
-                    let content_length = match res.headers().get("Content-Length") {
-                        Some(x) => x.to_str().unwrap().to_string(),
-                        None => "0".to_string(),
-                    };
-                    let stream = res.bytes_stream();
-                    let body = StreamBody::new(stream);
-                    return Ok(Response::builder()
-                        .status(status)
-                        .header("Content-Type", content_type)
-                        .header("Content-Length", content_length)
-                        .body(body)
-                        .unwrap());
+                    let res = res.expect("Failed to request gateway");
+                    if res.status().is_success() {
+                        debug!("Gateway responded: {}", url);
+
+                        let content_type = res
+                            .headers()
+                            .get("Content-Type")
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .to_string();
+                        let content_length = match res.headers().get("Content-Length") {
+                            Some(x) => x.to_str().unwrap().to_string(),
+                            None => "0".to_string(),
+                        };
+                        let status = res.status();
+
+                        // Save meta data
+                        let mut file = OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&cache_meta_path)
+                            .await
+                            .unwrap();
+                        let meta = format!("{} {}", content_type, content_length);
+                        file.write_all(meta.as_bytes()).await.unwrap();
+                        file.flush().await.unwrap();
+                        file.shutdown().await.unwrap();
+
+                        let stream = res.bytes_stream();
+                        let file = OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&cache_path)
+                            .await
+                            .unwrap();
+                        let writer = BufWriter::new(file);
+                        let stream = CachingStream::new(stream, writer);
+                        Some((status, content_type, content_length, stream))
+                    } else {
+                        None
+                    }
+                });
+            }
+            while let Some(Ok(Some((status, content_type, content_length, stream)))) =
+                tasks.join_next().await
+            {
+                if !status.is_success() {
+                    continue;
                 }
+                return Ok(Response::builder()
+                    .status(status)
+                    .header("Content-Type", content_type)
+                    .header("Content-Length", content_length)
+                    .body(Body::wrap_stream(stream))
+                    .unwrap());
             }
         }
         Err(CustomError::InternalServerError)
@@ -220,7 +323,7 @@ async fn main() -> Result<()> {
     // get IPFS_GATEWAYS
     let ipfs_gateways = std::env::var("IPFS_GATEWAYS")
         .unwrap_or_else(|_| {
-            "https://ipfs.io/ipfs,https://w3s.link/ipfs,https://cloudflare-ipfs.com/ipfs,https://hardbin.com/ipfs,https://gateway.pinata.cloud/ipfs"
+            "https://ipfs.io/ipfs,https://cloudflare-ipfs.com/ipfs,https://hardbin.com/ipfs,https://gateway.pinata.cloud/ipfs"
                 .to_string()
         })
         .split(',')
@@ -238,6 +341,10 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "500".to_string())
         .parse::<usize>()
         .unwrap_or(100);
+
+    // create a cache folder
+    let cache_folder = std::env::var("CACHE_FOLDER").unwrap_or_else(|_| "cache".to_string());
+    std::fs::create_dir_all(&cache_folder).expect("Failed to create cache folder");
 
     // create a reqwest client
     let client = Client::new();

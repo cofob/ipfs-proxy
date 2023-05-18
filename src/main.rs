@@ -1,25 +1,19 @@
 use anyhow::Result;
-use axum::body::Body;
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::Response;
 use axum::response::IntoResponse;
 use axum::Json;
 use axum::{routing::get, Router};
-use futures::Future;
-use futures::Stream;
-use reqwest::Error;
-use reqwest::{Client, StatusCode};
+use futures::{Future, Stream};
+use reqwest::{Client, Error, StatusCode};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::fs::File;
-use tokio::fs::OpenOptions;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
-use tokio::io::BufWriter;
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio_util::io::ReaderStream;
@@ -56,14 +50,28 @@ where
                         let _ = this.writer.flush();
                         Poll::Ready(Some(Ok(data_clone)))
                     }
-                    Poll::Ready(Err(_)) => Poll::Ready(None),
+                    Poll::Ready(Err(e)) => {
+                        error!("Error: {}", e);
+                        Poll::Ready(None)
+                    }
                     Poll::Pending => Poll::Pending,
                 }
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(Some(Err(e))) => {
+                error!("Error: {}", e);
+                Poll::Ready(Some(Err(e)))
+            }
+            Poll::Ready(None) => {
+                debug!("Stream ended");
+                Poll::Ready(None)
+            },
             Poll::Pending => Poll::Pending,
         }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
@@ -113,7 +121,7 @@ async fn handler(
     let cid = path.split('/').next().unwrap().to_string();
 
     let is_allowed = true;
-    let cache_path = format!("./cache/{}", cid.replace("/", "_"));
+    let cache_path = format!("./cache/{}.bin", path.replace("/", "_"));
     let cache_meta_path = format!("{}.meta", cache_path);
 
     // {
@@ -135,7 +143,7 @@ async fn handler(
 
             // Load file
             let file = File::open(&cache_path).await.unwrap();
-            let stream = ReaderStream::new(file);
+            let stream = ReaderStream::new(BufReader::with_capacity(1024 * 1024 * 10, file));
 
             // Return response
             let body = Body::wrap_stream(stream);
@@ -143,7 +151,8 @@ async fn handler(
                 .status(StatusCode::OK)
                 .header("Content-Type", content_type)
                 .header("Content-Length", content_length)
-                .header("Content-Type", "text/plain")
+                .header("Chache-State", "HIT")
+                .header("Cache-Control", "max-age=31536000")
                 .body(body)
                 .unwrap());
         } else {
@@ -195,15 +204,15 @@ async fn handler(
                             .open(&cache_path)
                             .await
                             .unwrap();
-                        let writer = BufWriter::new(file);
-                        let stream = CachingStream::new(stream, writer);
-                        Some((status, content_type, content_length, stream))
+                        let writer = BufWriter::with_capacity(1024 * 1024 * 10, file);
+                        let caching_stream = CachingStream::new(stream, writer);
+                        Some((url, status, content_type, content_length, caching_stream))
                     } else {
                         None
                     }
                 });
             }
-            while let Some(Ok(Some((status, content_type, content_length, stream)))) =
+            while let Some(Ok(Some((url, status, content_type, content_length, stream)))) =
                 tasks.join_next().await
             {
                 if !status.is_success() {
@@ -213,6 +222,9 @@ async fn handler(
                     .status(status)
                     .header("Content-Type", content_type)
                     .header("Content-Length", content_length)
+                    .header("Cache-Status", "MISS")
+                    .header("Cache-Control", "max-age=31536000")
+                    .header("Gateway", url)
                     .body(Body::wrap_stream(stream))
                     .unwrap());
             }
